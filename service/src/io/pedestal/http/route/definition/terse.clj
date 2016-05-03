@@ -190,3 +190,5 @@
 (defn terse-routes [route-spec]
   (verbose/expand-verbose-routes (map flatten-terse-app-routes route-spec)))
 
+(defn expand-routes [route-spec]
+  (terse-routes route-spec))

@@ -11,20 +11,21 @@
 ; You must not remove this notice, or any other, from this software.
 
 (ns io.pedestal.http.route
-  (:require [clojure.string :as str]
-            [clojure.core.incubator :refer [dissoc-in]]
-            [io.pedestal.interceptor :as interceptor]
-            [io.pedestal.interceptor.chain :as interceptor.chain]
-            [io.pedestal.log :as log]
+  (:require [clojure.core.incubator :refer [dissoc-in]]
+            [clojure.spec :as s]
+            [clojure.string :as str]
             [io.pedestal.http.route.definition :as definition]
-            [io.pedestal.http.route.definition.terse :as terse]
             [io.pedestal.http.route.definition.table :as table]
-            [io.pedestal.http.route.router :as router]
+            [io.pedestal.http.route.definition.terse :as terse]
             [io.pedestal.http.route.linear-search :as linear-search]
             [io.pedestal.http.route.map-tree :as map-tree]
-            [io.pedestal.http.route.prefix-tree :as prefix-tree])
-  (:import (java.net URLEncoder URLDecoder)))
-
+            [io.pedestal.http.route.prefix-tree :as prefix-tree]
+            [io.pedestal.http.route.router :as router]
+            [io.pedestal.interceptor :as interceptor]
+            [io.pedestal.interceptor.chain :as interceptor.chain]
+            [io.pedestal.log :as log])
+  (:import [java.net URLDecoder URLEncoder]
+           [java.util.regex Pattern]))
 
 (comment
   ;; Structure of a route. 'tree' returns a list of these.
@@ -350,7 +351,7 @@
 
   clojure.lang.APersistentSet
   (-expand-routes [route-spec]
-    (table/table-routes route-spec)))
+    (table/expand-routes route-spec)))
 
 (defn expand-routes
   "Given a value (the route specification), produce and return a sequence of of
@@ -369,6 +370,10 @@
    :post [(seq? %)
           (every? (every-pred map? :path :route-name :method) %)]}
   (definition/ensure-routes-integrity (-expand-routes route-spec)))
+
+(s/fdef expand-routes
+        :args #(satisfies? ExpandableRoutes %)
+        :ret  ::routes)
 
 (defprotocol RouterSpecification
   (router-spec [specification router-ctor]

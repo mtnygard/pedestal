@@ -10,10 +10,10 @@
 ;
 ; You must not remove this notice, or any other, from this software.
 
-(ns io.pedestal.http.route.definition)
+(ns io.pedestal.http.route.definition
+  (:require [clojure.spec :as s]))
 
 (def schemes #{:http :https})
-(def allowed-keys #{:route-name :app-name :path :method :scheme :host :port :interceptors :path-re :path-parts :path-params :path-constraints :query-constraints :matcher})
 
 (defn symbol->keyword
   [s]
@@ -80,4 +80,3 @@
   Define a routing table from the terse routing syntax."
   [name route-spec]
   `(def ~name (io.pedestal.http.route/expand-routes (quote ~route-spec))))
-

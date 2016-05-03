@@ -11,83 +11,30 @@
 ; You must not remove this notice, or any other, from this software.
 
 (ns io.pedestal.http.route.definition.table
-  (:require [io.pedestal.interceptor :as interceptor]
+  (:require [clojure.spec :as s]
             [io.pedestal.http.route.definition :as route-definition]
-            [io.pedestal.http.route.definition.verbose :as verbose]
-            [io.pedestal.http.route.path :as path])
-  (:import (java.util List)))
-
-(defn- error
-  [{:keys [row original]} msg]
-  (format "In row %d, %s\nThe whole route was: %s" (inc row) msg (or original "nil")))
-
-(defn- syntax-error
-  [ctx posn expected was]
-  (error ctx (format "%s should have been %s but was %s." posn expected (or was "nil"))))
-
-(defn- surplus-declarations
-  [{:keys [remaining] :as ctx}]
-  (error ctx (format "there were unused elements %s." remaining)))
-
-(def ^:private known-options [:app-name :host :port :scheme])
-(def ^:private known-verb    #{:any :get :put :post :delete :patch :options :head})
-(def ^:private default-port  {:http 80 :https 443})
-
-(defn make-parse-context
-  [opts row route]
-  (assert (vector? route) (syntax-error row nil "the element" "a vector" route))
-  (merge {:row       row
-          :original  route
-          :remaining route}
-         (select-keys opts known-options)))
-
-(defn take-next-pair
-  [argname expected-pred expected-str ctx]
-  (let [[param arg & more] (:remaining ctx)]
-    (if (= argname param)
-      (do
-        (assert (expected-pred arg) (syntax-error ctx (str "the parameter after" argname) expected-str arg))
-        (assoc ctx argname arg :remaining more))
-      ctx)))
-
-(defn parse-path
-  [ctx]
-  (let [[path & more] (:remaining ctx)]
-    (assert (string? path) (syntax-error ctx "the path (first element)" "a string" path))
-    (-> ctx
-        (merge (path/parse-path path))
-        (assoc :path path :remaining more))))
-
-(defn parse-verb
-  [ctx]
-  (let [[verb & more] (:remaining ctx)]
-    (assert (known-verb verb) (syntax-error ctx "the verb (second element)" (str "one of " known-verb) verb))
-    (assoc ctx :method verb :remaining more)))
+            [io.pedestal.http.route.path :as path]
+            [io.pedestal.http.route.spec :as spec]
+            [io.pedestal.interceptor :as interceptor]))
 
 (defn parse-handlers
   [ctx]
-  (let [[handlers & more] (:remaining ctx)]
-    (if (vector? handlers)
-      (assert (every? #(satisfies? interceptor/IntoInterceptor %) handlers) (syntax-error ctx "the vector of handlers" "a bunch of interceptors" handlers))
-      (assert (satisfies? interceptor/IntoInterceptor handlers)             (syntax-error ctx "the handler" "an interceptor" handlers)))
-    (let [original-handlers (if (vector? handlers) (vec handlers) [handlers])
-          handlers (mapv interceptor/interceptor original-handlers)]
-      (assoc ctx :interceptors handlers
-                 :remaining more
-                 :last-handler (last original-handlers)))))
+  (let [solo     (get-in ctx [:handlers :handler])
+        multiple (get-in ctx [:handlers :interceptors])
+        handlers (or multiple [solo])]
+    (assoc ctx
+           :interceptors (mapv interceptor/interceptor handlers)
+           :last-handler (last handlers))))
 
-(def attach-route-name  (partial take-next-pair :route-name  keyword? "a keyword"))
-
-(defn parse-route-name
+(defn apply-default-route-name
   [{:keys [route-name interceptors last-handler] :as ctx}]
   (if route-name
     ctx
-    (let [last-interceptor (some-> interceptors last)
-          default-route-name (cond
-                               (:name last-interceptor) (:name last-interceptor)
+    (let [default-route-name (cond
+                               (:name last-handler) (:name last-handler)
                                (symbol? last-handler) (route-definition/symbol->keyword last-handler)
                                :else nil)]
-      (assert default-route-name (error ctx "the last interceptor does not have a name and there is no explicit :route-name."))
+      (assert default-route-name (str "the last interceptor does not have a name and there is no explicit :route-name."))
       (assoc ctx :route-name default-route-name))))
 
 (defn- remove-empty-constraints
@@ -104,58 +51,50 @@
         (update :query-constraints merge query-constraints)
         remove-empty-constraints)))
 
-(def attach-constraints (partial take-next-pair :constraints map? "a map"))
-
-(defn attach-path-regex
-  [ctx]
-  (path/merge-path-regex ctx))
-
-(defn finalize
-  [ctx]
-  (assert (empty? (:remaining ctx)) (surplus-declarations ctx))
-  (select-keys ctx route-definition/allowed-keys))
+(s/def ::handlers        (s/or :interceptors (s/+ ::interceptor/interceptor)
+                               :handler ::interceptor/interceptor))
+(s/def ::options         (s/keys :opt-un [::spec/host ::spec/scheme ::spec/app-name ::spec/port]))
+(s/def ::route-table-row (s/cat :path        ::spec/path
+                                :method      ::spec/method
+                                :handlers    ::handlers
+                                :route-name  (s/? (s/cat :_ #(= :route-name %) :name keyword?))
+                                :constraints (s/? (s/cat :_ #(= :constraints %) :constraints map?))))
+(s/def ::route-table     (s/+ ::route-table-row))
 
 (defn route-table-row
-  [opts row route]
-  (-> opts
-      (make-parse-context row route)
-      parse-path
-      parse-verb
+  [opts rownum {:keys [path] :as route-row}]
+  (-> (merge route-row opts)
+      (assoc :row rownum)
+      (assoc :route-name  (get-in route-row [:route-name :name]))
+      (assoc :constraints (get-in route-row [:constraints :constraints]))
+      (merge (path/parse-path path))
       parse-handlers
-      attach-route-name
-      parse-route-name
-      attach-constraints
+      apply-default-route-name
       parse-constraints
-      attach-path-regex
-      finalize))
+      path/merge-path-regex))
 
-(defn route-name [route]
-  (if-let [rname-pos (some-> ^List route
-                             (.indexOf :route-name))]
-    (if (pos? rname-pos)
-      (nth route (inc rname-pos))
-      (nth route 2))
-    nil))
+(defn- map-vals [f m]
+  (reduce-kv
+   (fn [o k v] (assoc o k (f v)))
+   (with-meta {} (meta m))
+   m))
 
 (defn ensure-unique-route-names [routes]
-  (loop [seen-route-names #{}
-         rname (route-name (first routes))
-         rroutes (rest routes)]
-    (when rname
-      (assert (nil? (seen-route-names rname)) (str "Route name or handler appears more than once in the route spec: " rname))
-      (recur (conj seen-route-names rname) (route-name (first rroutes)) (rest rroutes)))))
+  (let [counts (keep (fn [[rn rs]] (when (> (count rs) 1) rn)) (group-by :route-name routes))]
+    (assert (empty? counts) (str "Route names or handlers appear more than once in the route spec: " counts))))
 
-(defn table-routes
-  ([routes]
-   (table-routes (or (first (filter map? routes)) {})
-                 (filterv vector? routes)))
-  ([opts routes]
-   {:pre [(map? opts)
-          (or (set? routes)
-              (sequential? routes))]}
-   (ensure-unique-route-names routes)
-   (route-definition/ensure-routes-integrity
-     (if (sequential? routes)
-       (map-indexed (partial route-table-row opts) routes)
-       (map #(route-table-row opts "" %) routes)))))
+(defn expand-routes
+  "Given a route specification, produce and return a sequence of
+  route-maps suitable as input to a RouterSpecification"
+  [opts routes]
+  (let [parsed-opts   (s/conform ::options opts)
+        parsed-routes (s/conform ::route-table routes)]
+    (assert (not= ::s/invalid parsed-opts)   (s/explain ::options     opts))
+    (assert (not= ::s/invalid parsed-routes) (s/explain ::route-table routes))
+    (ensure-unique-route-names parsed-routes)
+    (route-definition/ensure-routes-integrity
+     (map-indexed (partial route-table-row parsed-opts) parsed-routes))))
 
+(s/fdef expand-routes
+        :args [::route-table]
+        :ret  ::spec/routes)
